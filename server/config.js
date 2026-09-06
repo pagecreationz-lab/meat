@@ -1,0 +1,77 @@
+export const masters = {
+  locations: { required: ["name", "area"], fields: ["name", "area", "status"] },
+  shops: {
+    required: ["name", "code", "locationId"],
+    fields: [
+      "name",
+      "code",
+      "parentId",
+      "group",
+      "locationId",
+      "address",
+      "status",
+    ],
+  },
+  employees: {
+    required: ["code", "name", "role", "mobile", "salaryType", "salary"],
+    fields: [
+      "code",
+      "name",
+      "role",
+      "mobile",
+      "salaryType",
+      "salary",
+      "shopId",
+      "status",
+    ],
+  },
+  assets: {
+    required: ["type", "code"],
+    fields: ["type", "code", "assignedTo", "status", "serviceDate"],
+  },
+  categories: { required: ["name"], fields: ["name", "parentId", "status"] },
+  items: {
+    required: ["code", "name", "categoryId", "unit", "price"],
+    fields: [
+      "code",
+      "name",
+      "categoryId",
+      "unit",
+      "price",
+      "tax",
+      "lowStock",
+      "status",
+    ],
+  },
+  customers: {
+    required: ["name", "mobile", "address"],
+    fields: [
+      "name",
+      "mobile",
+      "address",
+      "driverId",
+      "creditLimit",
+      "openingBalance",
+      "status",
+    ],
+  },
+  suppliers: {
+    required: ["name", "mobile"],
+    fields: [
+      "name",
+      "mobile",
+      "address",
+      "driverId",
+      "paymentTerms",
+      "openingBalance",
+      "status",
+    ],
+  },
+  banks: {
+    required: ["name", "holder", "account", "ifsc"],
+    fields: ["name", "holder", "account", "ifsc", "upi", "status"],
+  },
+  qr: { required: ["code", "bankId"], fields: ["code", "bankId", "status"] },
+  expenseCategories: { required: ["name"], fields: ["name", "status"] },
+  roles: { required: ["name"], fields: ["name", "permissions", "status"] },
+};
