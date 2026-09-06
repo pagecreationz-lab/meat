@@ -1453,8 +1453,7 @@ app.use((err, req, res, next) => {
   });
 });
 export default app;
-if (process.env.NODE_ENV !== "test")
+if (process.env.NODE_ENV !== "test" && !process.env.VERCEL)
   app.listen(Number(process.env.PORT) || 4000, "127.0.0.1", () =>
     console.log("MeatFlow API: http://127.0.0.1:" + (process.env.PORT || 4000)),
   );
-if (process.env.NODE_ENV !== "test" && !process.env.VERCEL)

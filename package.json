@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "concurrently -k \"node --watch server/app.js\" \"vite\"",
-    "build": "vite build",
+    "build": "node --check server/app.js && vite build",
     "start": "node server/app.js",
     "test": "node --test tests/api.test.js",
     "test:e2e": "playwright test"

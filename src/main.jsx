@@ -70,7 +70,7 @@ function Login({ onLogin }) {
     [busy, setBusy] = useState(false),
     [demo, setDemo] = useState(false);
   useEffect(() => {
-    api("/health").then((h) => setDemo(h.demo));
+    api("/health").then((h) => setDemo(h.demo)).catch(() => setDemo(false));
   }, []);
   async function submit(e) {
     e.preventDefault();

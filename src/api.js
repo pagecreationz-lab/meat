@@ -8,7 +8,17 @@ export async function api(path, body, method) {
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  const data = await res.json();
+  const responseText = await res.text();
+  let data;
+  try {
+    data = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      res.status >= 500
+        ? `The server is unavailable (HTTP ${res.status}). Please contact the administrator.`
+        : "The server returned an unexpected response. Please contact the administrator.",
+    );
+  }
   if (!res.ok) {
     if (res.status === 401 && !path.startsWith("/auth/"))
       window.dispatchEvent(new Event("session-ended"));
