@@ -58,6 +58,8 @@ import {
 } from "./components";
 import { OrderModal, DeliveryModal, BillModal, Scanner } from "./workflows";
 import Dashboard from "./dashboard";
+import DriverDeliveries from "./DriverDeliveries";
+import DeliveryMap from "./DeliveryMap";
 import Reports from "./reports";
 import "./style.css";
 
@@ -70,7 +72,9 @@ function Login({ onLogin }) {
     [busy, setBusy] = useState(false),
     [demo, setDemo] = useState(false);
   useEffect(() => {
-    api("/health").then((h) => setDemo(h.demo)).catch(() => setDemo(false));
+    api("/health")
+      .then((h) => setDemo(h.demo))
+      .catch(() => setDemo(false));
   }, []);
   async function submit(e) {
     e.preventDefault();
@@ -378,7 +382,7 @@ function App() {
   }, [user]);
   useEffect(() => {
     if (!user) return;
-    const timer = setInterval(() => refresh().catch(() => {}), 30000);
+    const timer = setInterval(() => refresh().catch(() => {}), 10000);
     return () => clearInterval(timer);
   }, [user]);
   useEffect(() => {
@@ -386,25 +390,33 @@ function App() {
   }, [shopId]);
   useEffect(() => {
     if (user?.role !== "driver") return;
-    let last = 0;
-    const id = navigator.geolocation.watchPosition(
-      async (p) => {
-        setGpsState("Location connected");
-        if (Date.now() - last < 30000) return;
-        last = Date.now();
-        try {
-          await api("/actions/gps", {
-            lat: p.coords.latitude,
-            lng: p.coords.longitude,
-          });
-        } catch (e) {
-          setGpsState(e.message);
+    let cancelled = false,
+      busy = false;
+    const track = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const loc = await location();
+        if (cancelled) return;
+        const result = await api("/actions/gps", loc);
+        if (cancelled) return;
+        setGpsState("Live tracking connected");
+        if (result.acceptedIds?.length) {
+          await refresh();
+          notify("New delivery automatically accepted. Start GPS recorded.");
         }
-      },
-      () => setGpsState("Location unavailable — enable GPS to continue"),
-      { enableHighAccuracy: true, maximumAge: 10000 },
-    );
-    return () => navigator.geolocation.clearWatch(id);
+      } catch (e) {
+        if (!cancelled) setGpsState(e.message);
+      } finally {
+        busy = false;
+      }
+    };
+    track();
+    const timer = setInterval(track, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [user]);
   const navigate = (p) => {
     setPage(p);
@@ -885,7 +897,11 @@ function App() {
                       : "Offline"}
                   </Badge>
                 </div>
-                <div className="location-illustration">
+                <DeliveryMap points={points.slice().reverse()} />
+                <div
+                  className="location-illustration"
+                  style={{ height: "auto", padding: 8 }}
+                >
                   <MapPin size={34} />
                   <span>
                     {latest
@@ -925,7 +941,8 @@ function App() {
         </div>
         <p className="footnote">
           Locations update while the driver app is open and GPS permission is
-          enabled. The admin view refreshes every 30 seconds.
+          enabled. Driver GPS is requested every 5 seconds; the admin view
+          refreshes every 10 seconds.
         </p>
         <h3 className="space-top">Supplier visit log</h3>
         <Table
@@ -1027,180 +1044,21 @@ function App() {
     );
   }
   function driverHome() {
-    const assigned = data.orders.filter(
-        (o) => o.driverId === user.id && o.status === "Pending",
-      ),
-      due = balances(data).reduce((s, c) => s + c.outstanding, 0);
     return (
-      <>
-        <div className="driver-hero">
-          <span className="eyebrow">LET’S MAKE IT A GOOD DAY</span>
-          <h2>Hello, {user.name.split(" ")[0]}.</h2>
-          <p>{assigned.length} deliveries are waiting for you.</p>
-          <div className="gps-pill">
-            <MapPin size={14} />
-            {gpsState || "Connecting GPS…"}
-          </div>
-        </div>
-        <div className="driver-quick">
-          <button onClick={() => act("order")}>
-            <ShoppingBag />
-            <span>Pre-order</span>
-          </button>
-          <button
-            onClick={() =>
-              act("payment", { partyType: "Customer", mode: "Cash" })
-            }
-          >
-            <Wallet />
-            <span>Collection</span>
-          </button>
-          <button onClick={() => act("visit")}>
-            <Truck />
-            <span>Supplier visit</span>
-          </button>
-          <button onClick={() => act("expense")}>
-            <Receipt />
-            <span>Expense</span>
-          </button>
-        </div>
-        <div className="section-toolbar">
-          <button className="text-button" onClick={() => navigate("billing")}>
-            <Receipt size={16} /> View bills & delivery challans{" "}
-            <ArrowRight size={15} />
-          </button>
-        </div>
-        <div className="stats-grid driver-stats">
-          <div className="stat-card">
-            <span>Today's deliveries</span>
-            <strong>
-              {
-                data.deliveries.filter(
-                  (d) =>
-                    d.driverId === user.id && d.timestamp.startsWith(day()),
-                ).length
-              }
-            </strong>
-          </div>
-          <div className="stat-card">
-            <span>Customer outstanding</span>
-            <strong>{money(due)}</strong>
-          </div>
-        </div>
-        <div className="section-title">
-          <h3>Your delivery list</h3>
-          <button className="text-button" onClick={() => navigate("orders")}>
-            All orders <ArrowRight size={15} />
-          </button>
-        </div>
-        <div className="delivery-cards">
-          {assigned.length ? (
-            assigned.map((o) => (
-              <article className="delivery-card" key={o.id}>
-                <div className="section-title">
-                  <span className="eyebrow">{o.number}</span>
-                  <Badge>{o.status}</Badge>
-                </div>
-                <h3>{label(data, "customers", o.customerId)}</h3>
-                <p>
-                  <MapPin size={14} />
-                  {data.customers.find((c) => c.id === o.customerId)?.address}
-                </p>
-                <div className="delivery-meta">
-                  <span>
-                    {o.items.length} items · Due {o.deliveryDate}
-                  </span>
-                  <strong>{money(o.total)}</strong>
-                </div>
-                <div className="button-group">
-                  <button className="button" onClick={() => act("deliver", o)}>
-                    Confirm delivery <ArrowRight size={16} />
-                  </button>
-                  {!data.bills.some((b) => b.orderId === o.id) && (
-                    <button
-                      className="button secondary"
-                      onClick={() => act("confirmBill", o)}
-                    >
-                      Create bill
-                    </button>
-                  )}
-                </div>
-              </article>
-            ))
-          ) : (
-            <Empty
-              title="No pending deliveries"
-              description="New assigned orders will appear here."
-            />
-          )}
-        </div>
-      </>
+      <DriverDeliveries
+        data={data}
+        user={user}
+        gpsState={gpsState}
+        page={page}
+        act={act}
+      />
     );
   }
   let content;
   if (driver) {
     content =
-      page === "dashboard" ? (
-        driverHome()
-      ) : page === "orders" ? (
-        ordersView()
-      ) : page === "billing" ? (
-        billsView()
-      ) : page === "payments" ? (
-        paymentView()
-      ) : page === "expenses" ? (
-        expensesView()
-      ) : page === "customers" ? (
-        <Table
-          rows={balances(data)}
-          columns={[
-            ...columns([
-              ["name", "Customer"],
-              ["total", "Total due", "money"],
-              ["paid", "Paid", "money"],
-              ["outstanding", "Outstanding", "money"],
-            ]),
-            {
-              key: "balanceStatus",
-              label: "Status",
-              render: (r) => <Badge>{r.balanceStatus}</Badge>,
-            },
-          ]}
-        />
-      ) : page === "visits" ? (
-        <>
-          <div className="section-toolbar">
-            <h3>Supplier visits</h3>
-            <button className="button" onClick={() => act("visit")}>
-              <Plus size={16} />
-              Log visit
-            </button>
-          </div>
-          <Table
-            rows={data.visits}
-            columns={[
-              ...columns([
-                ["supplierId", "Supplier", "suppliers"],
-                ["timestamp", "Timestamp"],
-              ]),
-              {
-                key: "items",
-                label: "Loaded items",
-                render: (r) =>
-                  r.items
-                    .map((l) => `${l.name}: ${l.qty} ${l.unit}`)
-                    .join(", "),
-              },
-              {
-                key: "gps",
-                label: "GPS",
-                render: (r) => `${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}`,
-              },
-            ]}
-          />
-        </>
-      ) : (
-        <div className="panel">
+      page === "settings" ? (
+        <section className="panel">
           <h3>{user.name}</h3>
           <p>{user.mobile}</p>
           <button className="button secondary" onClick={() => act("password")}>
@@ -1209,7 +1067,9 @@ function App() {
           <button className="button secondary" onClick={logout}>
             Sign out
           </button>
-        </div>
+        </section>
+      ) : (
+        driverHome()
       );
   } else if (page === "dashboard")
     content = (
@@ -1818,10 +1678,8 @@ function App() {
             {[
               ["dashboard", "Home", LayoutDashboard],
               ["orders", "Orders", ShoppingBag],
-              ["payments", "Payments", Wallet],
-              ["customers", "Balances", Users],
-              ["visits", "Visits", Truck],
-              ["expenses", "Expenses", Receipt],
+              ["notifications", "Notifications", Bell],
+              ["settings", "Profile", Settings],
             ].map(([p, t, I]) => (
               <button
                 className={page === p ? "active" : ""}
@@ -1855,7 +1713,11 @@ function App() {
       )}
       {modal &&
         (() => {
-          const { type, record } = modal,
+          const { type } = modal,
+            record = ["orderDetail", "deliver"].includes(type)
+              ? data.orders.find((o) => o.id === modal.record?.id) ||
+                modal.record
+              : modal.record,
             onClose = () => setModal(null);
           if (type === "master") {
             const { kind, ...initial } = record;
@@ -1937,6 +1799,31 @@ function App() {
           if (type === "orderDetail")
             return (
               <Modal wide title={record.number} onClose={onClose}>
+                {record.deliveryAddress && (
+                  <>
+                    <h3>{record.deliveryAddress}</h3>
+                    <p>
+                      {record.paymentMethod}{" "}
+                      {record.prepaidReference &&
+                        `· Reference: ${record.prepaidReference}`}
+                    </p>
+                    <p>
+                      {record.acceptedAt
+                        ? `Automatically accepted: ${new Date(record.acceptedAt).toLocaleString()}`
+                        : "Waiting for driver GPS acceptance"}
+                    </p>
+                    <DeliveryMap
+                      lat={record.dropLocation?.lat}
+                      lng={record.dropLocation?.lng}
+                      start={record.startLocation}
+                      drop={record.actualDropLocation}
+                      points={data.tracking
+                        .filter((t) => t.orderIds?.includes(record.id))
+                        .slice()
+                        .reverse()}
+                    />
+                  </>
+                )}
                 <Table
                   search={false}
                   rows={record.items}
@@ -1975,6 +1862,12 @@ function App() {
                 title={record.name + " · Route history"}
                 onClose={onClose}
               >
+                <DeliveryMap
+                  points={data.tracking
+                    .filter((t) => t.driverId === record.id)
+                    .slice()
+                    .reverse()}
+                />
                 <Table
                   rows={record.points}
                   columns={[

@@ -49,6 +49,8 @@ export const masters = {
       "name",
       "mobile",
       "address",
+      "lat",
+      "lng",
       "driverId",
       "creditLimit",
       "openingBalance",

@@ -117,6 +117,8 @@ export const schemas = {
       f("name", "Customer name"),
       f("mobile", "Mobile number", "tel"),
       f("address", "Address"),
+      f("lat", "Saved destination latitude", "text", null, false),
+      f("lng", "Saved destination longitude", "text", null, false),
       f("driverId", "Assigned driver", "ref", "drivers", false),
       f("creditLimit", "Credit limit (0 = unlimited)", "number", null, false),
       f("openingBalance", "Opening balance", "number", null, false),

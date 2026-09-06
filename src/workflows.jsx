@@ -11,6 +11,7 @@ import {
 import { field as f, money, label, day } from "./schema";
 import { api, location } from "./api";
 import { prepareOrderSubmission } from "./order-validation";
+import DeliveryMap from "./DeliveryMap";
 export function OrderModal({
   mode = "order",
   record,
@@ -26,7 +27,15 @@ export function OrderModal({
     channel: "Wholesale",
     deliveryDate: day(),
     shopId,
+    deliveryAddress: "",
+    dropLat: "",
+    dropLng: "",
+    paymentMethod: "Cash on delivery",
+    prepaidReference: "",
     ...record,
+    ...(record?.dropLocation
+      ? { dropLat: record.dropLocation.lat, dropLng: record.dropLocation.lng }
+      : {}),
   });
   const [items, setItems] = useState(
     record?.items || [{ itemId: "", qty: 1, price: 0 }],
@@ -34,6 +43,45 @@ export function OrderModal({
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const supplier = ["purchase", "visit", "finalizePurchase"].includes(mode);
+  const updateValue = (update) =>
+    setValue((previous) => {
+      const next = typeof update === "function" ? update(previous) : update;
+      if (
+        next.customerId !== previous.customerId ||
+        next.shopId !== previous.shopId
+      ) {
+        const customer = data.customers.find((c) => c.id === next.customerId);
+        const eligible = data.users.filter(
+          (u) =>
+            u.role === "driver" &&
+            u.status === "Active" &&
+            u.shops?.includes(next.shopId),
+        );
+        const assigned =
+          eligible.find((u) => u.id === customer?.driverId) ||
+          eligible.sort(
+            (a, b) =>
+              data.orders.filter(
+                (o) => o.driverId === a.id && o.status === "Pending",
+              ).length -
+              data.orders.filter(
+                (o) => o.driverId === b.id && o.status === "Pending",
+              ).length,
+          )[0];
+        return {
+          ...next,
+          driverId: assigned?.id || "",
+          ...(next.customerId !== previous.customerId
+            ? {
+                deliveryAddress: customer?.address || "",
+                dropLat: customer?.lat ?? "",
+                dropLng: customer?.lng ?? "",
+              }
+            : {}),
+        };
+      }
+      return next;
+    });
   return (
     <Modal
       wide
@@ -73,7 +121,7 @@ export function OrderModal({
           <Fields
             data={data}
             value={value}
-            setValue={setValue}
+            setValue={updateValue}
             fields={[
               f("shopId", "Shop / location", "ref", "shops"),
               ...(supplier
@@ -85,7 +133,19 @@ export function OrderModal({
                   ]
                 : [
                     f("customerId", "Customer", "ref", "customers"),
-                    f("driverId", "Driver", "ref", "drivers", false),
+                    f("driverId", "Assigned driver", "ref", "drivers"),
+                    f(
+                      "deliveryAddress",
+                      "Customer delivery address",
+                      "textarea",
+                    ),
+                    f("paymentMethod", "Payment option", "select", [
+                      "Prepaid",
+                      "Cash on delivery",
+                    ]),
+                    ...(value.paymentMethod === "Prepaid"
+                      ? [f("prepaidReference", "Prepaid payment reference")]
+                      : []),
                     f("channel", "Sales type", "select", [
                       "Wholesale",
                       "Retail",
@@ -94,6 +154,57 @@ export function OrderModal({
                   ]),
             ]}
           />
+        )}
+        {!supplier && (
+          <>
+            <p className="info">
+              Click the map to pin the exact customer destination, or enter its
+              coordinates. This must be the customer's location.
+            </p>
+            <div className="form-grid">
+              <label>
+                Destination latitude
+                <input
+                  aria-label="Destination latitude"
+                  required
+                  type="number"
+                  step="any"
+                  min="-90"
+                  max="90"
+                  value={value.dropLat}
+                  onChange={(e) =>
+                    setValue((v) => ({ ...v, dropLat: e.target.value }))
+                  }
+                />
+              </label>
+              <label>
+                Destination longitude
+                <input
+                  aria-label="Destination longitude"
+                  required
+                  type="number"
+                  step="any"
+                  min="-180"
+                  max="180"
+                  value={value.dropLng}
+                  onChange={(e) =>
+                    setValue((v) => ({ ...v, dropLng: e.target.value }))
+                  }
+                />
+              </label>
+            </div>
+            <DeliveryMap
+              lat={value.dropLat}
+              lng={value.dropLng}
+              onPick={(p) =>
+                setValue((v) => ({
+                  ...v,
+                  dropLat: p.lat.toFixed(6),
+                  dropLng: p.lng.toFixed(6),
+                }))
+              }
+            />
+          </>
         )}
         <LineEditor
           items={data.items}
@@ -172,6 +283,17 @@ export function DeliveryModal({ order, onClose, onSave, data }) {
           <span>
             {order.number} · {money(order.total)}
           </span>
+          <p>{order.deliveryAddress}</p>
+          <strong>
+            {order.paymentMethod || "Payment option not recorded"}
+          </strong>
+          <p>
+            {order.paymentMethod === "Prepaid"
+              ? "No cash to collect."
+              : order.paymentMethod === "Cash on delivery"
+                ? `Cash on delivery amount: ${money(order.total)}`
+                : ""}
+          </p>
         </div>
         <label>
           Loaded weight (kg) *

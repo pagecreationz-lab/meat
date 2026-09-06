@@ -38,7 +38,7 @@ export function location() {
             "Location access is required. Enable GPS permission and retry.",
           ),
         ),
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 15000 },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
     );
   });
 }

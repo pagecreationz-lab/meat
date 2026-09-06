@@ -29,7 +29,18 @@ const post = (url, body, token = admin) =>
   request(app)
     .post("/api" + url)
     .set("Authorization", "Bearer " + token)
-    .send(body);
+    .send(
+      url === "/actions/order"
+        ? {
+            deliveryAddress: "Customer delivery address",
+            dropLat: 13.08,
+            dropLng: 80.27,
+            paymentMethod: "Cash on delivery",
+            driverId: "driver-1",
+            ...body,
+          }
+        : body,
+    );
 const boot = (token = admin) =>
   request(app)
     .get("/api/bootstrap")
@@ -105,29 +116,46 @@ test("master validation, duplicate codes and hierarchy cycles", async () => {
     400,
   );
 });
-test("drivers can edit and cancel their unbilled pending pre-orders", async () => {
-  const o = await order();
-  const edited = await post(
-    "/actions/order",
-    { ...o, items: [{ itemId: "item-1", qty: 2, price: 1 }] },
-    driver,
-  );
-  assert.equal(edited.status, 200);
-  assert.equal(edited.body.id, o.id);
-  assert.equal(edited.body.total, 960);
-  const cancelled = await post("/actions/cancelOrder", { id: o.id }, driver);
-  assert.equal(cancelled.status, 200);
-  assert.equal(cancelled.body.status, "Cancelled");
-  assert.equal(
-    (
-      await post(
-        "/actions/order",
-        { ...o, items: [{ itemId: "item-1", qty: 1 }] },
-        driver,
-      )
-    ).status,
-    400,
-  );
+test("driver app blocks removed operations on the server", async () => {
+  for (const action of [
+    "order",
+    "cancelOrder",
+    "bill",
+    "payment",
+    "visit",
+    "expense",
+  ])
+    assert.equal((await post("/actions/" + action, {}, driver)).status, 403);
+});
+
+test("order errors identify which missing reference needs correction", async () => {
+  const body = {
+    shopId: "shop-1",
+    customerId: "customer-1",
+    channel: "Retail",
+    items: [{ itemId: "item-1", qty: 1 }],
+  };
+  const missing = await post("/actions/order", { ...body, shopId: "" });
+  assert.equal(missing.status, 400);
+  assert.match(missing.body.error, /Select a shop/);
+  const shop = await post("/actions/order", {
+    ...body,
+    shopId: "deleted-shop",
+  });
+  assert.equal(shop.status, 404);
+  assert.match(shop.body.error, /selected shop was not found/);
+  const customer = await post("/actions/order", {
+    ...body,
+    customerId: "deleted-customer",
+  });
+  assert.equal(customer.status, 404);
+  assert.match(customer.body.error, /selected customer was not found/);
+  const item = await post("/actions/order", {
+    ...body,
+    items: [{ itemId: "deleted-item", qty: 1 }],
+  });
+  assert.equal(item.status, 404);
+  assert.match(item.body.error, /selected item was not found/);
 });
 test("billing deducts stock once, blocks fourth outstanding bill and logs notification", async () => {
   const initial = (await boot()).body.stock
@@ -138,7 +166,7 @@ test("billing deducts stock once, blocks fourth outstanding bill and logs notifi
     const billed = await post(
       "/actions/bill",
       { shopId: "shop-1", orderId: o.id },
-      driver,
+      admin,
     );
     assert.equal(billed.status, 200, billed.text);
     assert.equal(billed.body.total, 480);
@@ -241,6 +269,7 @@ test("purchase finalization locks prices for 48 hours and receives stock once", 
 });
 test("delivery requires signature, GPS and assigned driver; captures evidence", async () => {
   const o = await order();
+  await post("/actions/gps", { lat: 13.08, lng: 80.27 }, driver);
   assert.equal(
     (await post("/actions/deliver", { orderId: o.id, loadedWeight: 1 }, driver))
       .status,
@@ -440,7 +469,7 @@ test("assigned driver roles restrict actions and exports without granting admin 
   );
   const result = await boot(token);
   assert.equal(result.body.expenses.length, 0);
-  assert.ok(result.body.orders.length);
+  assert.equal(result.body.orders.length, 0);
 });
 test("concurrent billing remains atomic and retains the cost snapshot", async () => {
   const o = (await boot()).body.orders.find(
@@ -457,6 +486,82 @@ test("concurrent billing remains atomic and retains the cost snapshot", async ()
     (await boot()).body.stock.filter((s) => s.billId === bill.id).length,
     1,
   );
+});
+test("delivery assignment requires exact destination and payment, auto-accepts once, and scopes GPS", async () => {
+  const base = {
+    shopId: "shop-1",
+    customerId: "customer-1",
+    driverId: "driver-1",
+    channel: "Retail",
+    items: [{ itemId: "item-1", qty: 1 }],
+  };
+  assert.equal(
+    (await post("/actions/order", { ...base, dropLat: "" })).status,
+    400,
+  );
+  assert.equal(
+    (await post("/actions/order", { ...base, deliveryAddress: "" })).status,
+    400,
+  );
+  assert.equal(
+    (
+      await post("/actions/order", {
+        ...base,
+        paymentMethod: "Prepaid",
+        prepaidReference: "",
+      })
+    ).status,
+    400,
+  );
+  const prepaid = await post("/actions/order", {
+    ...base,
+    paymentMethod: "Prepaid",
+    prepaidReference: "BANK-123",
+  });
+  assert.equal(prepaid.status, 200);
+  const login = await request(app)
+    .post("/api/auth/login")
+    .send({
+      username: "arun",
+      password: "NewDriver@123",
+      deviceId: "delivery-flow",
+      lat: 13.1,
+      lng: 80.1,
+    });
+  const token = login.body.token;
+  const before = (await boot(token)).body;
+  assert.ok(before.notifications.some((n) => n.orderId === prepaid.body.id));
+  assert.ok(before.orders.every((o) => o.driverId === "driver-1"));
+  assert.equal(before.suppliers.length, 0);
+  assert.equal(before.payments.length, 0);
+  const start = await post("/actions/gps", { lat: 13.11, lng: 80.22 }, token);
+  assert.ok(start.body.acceptedIds.includes(prepaid.body.id));
+  const follow = await post("/actions/gps", { lat: 13.12, lng: 80.23 }, token);
+  assert.ok(!follow.body.acceptedIds.includes(prepaid.body.id));
+  assert.ok(follow.body.orderIds.includes(prepaid.body.id));
+  const accepted = (await boot(token)).body.orders.find(
+    (o) => o.id === prepaid.body.id,
+  );
+  assert.deepEqual(accepted.startLocation, { lat: 13.11, lng: 80.22 });
+  assert.equal(accepted.paymentMethod, "Prepaid");
+  assert.deepEqual(accepted.dropLocation, { lat: 13.08, lng: 80.27 });
+  const finished = await post(
+    "/actions/deliver",
+    {
+      orderId: prepaid.body.id,
+      loadedWeight: 1,
+      lat: 13.08,
+      lng: 80.27,
+      signature: "data:image/png;base64," + "a".repeat(250),
+    },
+    token,
+  );
+  assert.equal(finished.status, 200);
+  const done = (await boot()).body.orders.find((o) => o.id === prepaid.body.id);
+  assert.equal(done.status, "Delivered");
+  assert.deepEqual(done.actualDropLocation, { lat: 13.08, lng: 80.27 });
+  const last = await post("/actions/gps", { lat: 13.15, lng: 80.24 }, token);
+  assert.ok(!last.body.orderIds.includes(prepaid.body.id));
 });
 test("mapping the same device to another driver invalidates the previous session", async () => {
   const first = await request(app).post("/api/auth/login").send({

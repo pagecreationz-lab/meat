@@ -472,7 +472,28 @@ app.get(
       data.tracking = data.tracking.filter((t) => t.driverId === req.user.id);
       data.expenses = data.expenses.filter((e) => e.createdBy === req.user.id);
       data.visits = data.visits.filter((e) => e.driverId === req.user.id);
-      delete data.notifications;
+      data.orders = data.orders.filter((o) => o.driverId === req.user.id);
+      const orderIds = new Set(data.orders.map((o) => o.id));
+      data.deliveries = data.deliveries.filter((d) => orderIds.has(d.orderId));
+      data.bills = [];
+      data.customers = data.customers.filter((c) =>
+        data.orders.some((o) => o.customerId === c.id),
+      );
+      data.notifications = data.notifications.filter(
+        (n) => n.driverId === req.user.id,
+      );
+      for (const key of [
+        "suppliers",
+        "payments",
+        "banks",
+        "qr",
+        "expenses",
+        "expenseCategories",
+        "visits",
+        "stock",
+        "assets",
+      ])
+        data[key] = [];
       const viewGroups = {
         Orders: ["orders", "deliveries"],
         Billing: ["bills"],
@@ -481,9 +502,7 @@ app.get(
         Expenses: ["expenses", "expenseCategories"],
         "Supplier visits": ["visits"],
       };
-      for (const [resource, kinds] of Object.entries(viewGroups))
-        if (!(await permitted(req.user, resource, "View")))
-          for (const kind of kinds) data[kind] = [];
+      // Mandatory driver deliveries cannot be hidden by legacy permission templates.
     }
     res.json(data);
   }),
@@ -498,6 +517,17 @@ app.post(
     const body = req.body;
     const data = {};
     for (const f of spec.fields) if (body[f] !== undefined) data[f] = body[f];
+    if (kind === "customers") {
+      if (
+        (data.lat !== undefined && data.lat !== "") ||
+        (data.lng !== undefined && data.lng !== "")
+      ) {
+        Object.assign(data, gps(data));
+      } else {
+        delete data.lat;
+        delete data.lng;
+      }
+    }
     for (const f of spec.required)
       if (
         data[f] === undefined ||
@@ -640,6 +670,8 @@ app.delete(
 app.get(
   "/api/export/:kind",
   wrap(async (req, res) => {
+    if (req.user.role === "driver")
+      fail("Exports are available in the admin portal only", 403);
     const resources = {
       bills: "Billing",
       orders: "Orders",
@@ -748,16 +780,7 @@ app.post(
     const b = req.body,
       u = req.user,
       action = req.params.action;
-    const driverAllowed = [
-      "order",
-      "cancelOrder",
-      "deliver",
-      "bill",
-      "payment",
-      "expense",
-      "visit",
-      "gps",
-    ];
+    const driverAllowed = ["deliver", "gps"];
     if (u.role !== "superadmin" && !driverAllowed.includes(action))
       fail("Super admin access required", 403);
     const privileges = {
@@ -769,7 +792,11 @@ app.post(
       expense: ["Expenses", "Create"],
       visit: ["Supplier visits", "Create"],
     };
-    if (privileges[action] && !(await permitted(u, ...privileges[action])))
+    if (
+      u.role !== "driver" &&
+      privileges[action] &&
+      !(await permitted(u, ...privileges[action]))
+    )
       fail("Your assigned permission role does not allow this action", 403);
     if (["order", "bill", "stock", "purchase", "visit"].includes(action))
       await shopAccess(u, b.shopId);
@@ -790,6 +817,22 @@ app.post(
               fail("An existing order cannot move to another shop");
           }
           const customer = await active("customers", b.customerId, c);
+          if (!String(b.deliveryAddress || "").trim())
+            fail("Enter the customer delivery address");
+          if (b.dropLat === "" || b.dropLng === "")
+            fail("Pin the exact customer destination");
+          const dropLocation = gps({ lat: b.dropLat, lng: b.dropLng });
+          if (!["Prepaid", "Cash on delivery"].includes(b.paymentMethod))
+            fail("Select Prepaid or Cash on delivery");
+          if (
+            b.paymentMethod === "Prepaid" &&
+            !String(b.prepaidReference || "").trim()
+          )
+            fail("Enter the prepaid payment reference");
+          if (existing?.acceptedAt)
+            fail(
+              "An accepted delivery cannot be edited. Contact the driver before cancelling it.",
+            );
           const itemLines = await lines(
             u.role === "driver"
               ? (b.items || []).map(({ itemId, qty }) => ({ itemId, qty }))
@@ -798,6 +841,15 @@ app.post(
           );
           const driverId =
             u.role === "driver" ? u.id : b.driverId || customer.driverId;
+          if (!driverId) fail("Assign a driver to this order");
+          const assignedDriver = (
+            await c.query(
+              "SELECT shops FROM users WHERE id=$1 AND role='driver' AND status='Active'",
+              [driverId],
+            )
+          ).rows[0];
+          if (!assignedDriver || !assignedDriver.shops.includes(b.shopId))
+            fail("Choose an active driver assigned to this shop");
           if (
             driverId &&
             !(
@@ -815,6 +867,16 @@ app.post(
             {
               number: existing?.number || "ORD-" + Date.now(),
               customerId: customer.id,
+              deliveryAddress: String(b.deliveryAddress).trim(),
+              dropLocation,
+              paymentMethod: b.paymentMethod,
+              prepaidReference:
+                b.paymentMethod === "Prepaid"
+                  ? String(b.prepaidReference).trim()
+                  : "",
+              assignedAt: new Date().toISOString(),
+              acceptedAt: null,
+              startLocation: null,
               driverId,
               shopId: b.shopId,
               items: itemLines,
@@ -828,6 +890,18 @@ app.post(
             },
             c,
             existing?.id,
+          );
+          await put(
+            "notifications",
+            {
+              driverId,
+              orderId: r.id,
+              title: "Delivery assigned — automatic acceptance required",
+              detail: `${r.number} · ${customer.name} · ${b.paymentMethod} · INR ${r.total}`,
+              date: today(),
+              read: false,
+            },
+            c,
           );
           break;
         }
@@ -848,6 +922,14 @@ app.post(
           if (o.status !== "Pending") fail("Order is no longer pending");
           if (u.role === "driver" && o.driverId !== u.id)
             fail("This delivery is assigned to another driver", 403);
+          if (!o.acceptedAt)
+            fail(
+              "Waiting for driver GPS to automatically accept this delivery",
+            );
+          if (!o.dropLocation)
+            fail(
+              "The admin must capture the customer destination before delivery",
+            );
           const loc = gps(b);
           if (
             !b.signature ||
@@ -870,7 +952,17 @@ app.post(
             },
             c,
           );
-          await put("orders", { ...o, status: "Delivered" }, c, o.id);
+          await put(
+            "orders",
+            {
+              ...o,
+              status: "Delivered",
+              actualDropLocation: loc,
+              deliveredAt: r.timestamp,
+            },
+            c,
+            o.id,
+          );
           break;
         }
         case "bill": {
@@ -1173,11 +1265,40 @@ app.post(
           break;
         }
         case "gps": {
+          const loc = gps(b),
+            timestamp = new Date().toISOString();
+          const assigned = (await all("orders", c)).filter(
+            (o) => o.driverId === u.id && o.status === "Pending",
+          );
+          const acceptedIds = [];
+          for (const o of assigned) {
+            if (
+              !o.acceptedAt &&
+              o.dropLocation &&
+              o.deliveryAddress &&
+              o.paymentMethod
+            ) {
+              await put(
+                "orders",
+                { ...o, acceptedAt: timestamp, startLocation: loc },
+                c,
+                o.id,
+              );
+              acceptedIds.push(o.id);
+              await audit(u, "Auto-accept delivery", o.number, c);
+            }
+          }
           r = await put(
             "tracking",
-            { driverId: u.id, ...gps(b), timestamp: new Date().toISOString() },
+            {
+              driverId: u.id,
+              ...loc,
+              timestamp,
+              orderIds: assigned.map((o) => o.id),
+            },
             c,
           );
+          r.acceptedIds = acceptedIds;
           break;
         }
         case "attendance": {
@@ -1428,12 +1549,10 @@ async function sendMessages() {
     sending = false;
   }
 }
+let smsTimer;
 if (!process.env.VERCEL) {
-  const timer = setInterval(
-    () => sendMessages().catch(console.error),
-    15000
-  );
-  timer.unref();
+  smsTimer = setInterval(() => sendMessages().catch(console.error), 15000);
+  smsTimer.unref();
 }
 app.use(express.static(path.resolve("dist")));
 app.get("/{*path}", (req, res) => {
@@ -1453,7 +1572,26 @@ app.use((err, req, res, next) => {
   });
 });
 export default app;
-if (process.env.NODE_ENV !== "test" && !process.env.VERCEL)
-  app.listen(Number(process.env.PORT) || 4000, "127.0.0.1", () =>
+if (process.env.NODE_ENV !== "test" && !process.env.VERCEL) {
+  const server = app.listen(Number(process.env.PORT) || 4000, "127.0.0.1", () =>
     console.log("MeatFlow API: http://127.0.0.1:" + (process.env.PORT || 4000)),
   );
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    clearInterval(smsTimer);
+    try {
+      await new Promise((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await db.close();
+      process.exitCode = 0;
+    } catch (error) {
+      console.error("Database shutdown failed:", error.message);
+      process.exitCode = 1;
+    }
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
