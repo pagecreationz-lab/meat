@@ -10,6 +10,7 @@ import {
 } from "./components";
 import { field as f, money, label, day } from "./schema";
 import { api, location } from "./api";
+import { prepareOrderSubmission } from "./order-validation";
 export function OrderModal({
   mode = "order",
   record,
@@ -24,6 +25,7 @@ export function OrderModal({
     driverId: "",
     channel: "Wholesale",
     deliveryDate: day(),
+    shopId,
     ...record,
   });
   const [items, setItems] = useState(
@@ -51,8 +53,14 @@ export function OrderModal({
           setBusy(true);
           setError("");
           try {
+            const submission = prepareOrderSubmission({
+              mode,
+              value,
+              items,
+              data,
+            });
             const loc = mode === "visit" ? await location() : {};
-            await onSave({ ...value, items, shopId, ...loc });
+            await onSave({ ...submission, ...loc });
             onClose();
           } catch (e) {
             setError(e.message);
@@ -66,8 +74,9 @@ export function OrderModal({
             data={data}
             value={value}
             setValue={setValue}
-            fields={
-              supplier
+            fields={[
+              f("shopId", "Shop / location", "ref", "shops"),
+              ...(supplier
                 ? [
                     f("supplierId", "Supplier", "ref", "suppliers"),
                     ...(mode === "visit"
@@ -82,8 +91,8 @@ export function OrderModal({
                       "Retail",
                     ]),
                     f("deliveryDate", "Delivery date", "date"),
-                  ]
-            }
+                  ]),
+            ]}
           />
         )}
         <LineEditor
@@ -92,6 +101,12 @@ export function OrderModal({
           onChange={setItems}
           locked={mode === "finalizePurchase"}
         />
+        {!data.shops.some((s) => s.status === "Active") && (
+          <p className="error">
+            No active shop is available. Create a shop in Master settings →
+            Shops, or ask the admin to assign one to your driver account.
+          </p>
+        )}
         {mode === "purchase" && (
           <p className="info">
             Initial prices are saved now. Final prices can be updated and stock

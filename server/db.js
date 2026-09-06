@@ -12,6 +12,11 @@ const local = pool
 export const db = {
   query: (sql, params = []) =>
     pool ? pool.query(sql, params) : local.query(sql, params),
+  close: async () => {
+    await queue;
+    if (pool) await pool.end();
+    else await local.close();
+  },
 };
 let queue = Promise.resolve();
 export function transaction(fn) {
@@ -66,13 +71,34 @@ export async function all(kind, client = db) {
   }));
 }
 export async function get(kind, id, client = db) {
+  const names = {
+    shops: "shop",
+    customers: "customer",
+    items: "item",
+    suppliers: "supplier",
+    orders: "order",
+    roles: "permission role",
+    locations: "location",
+  };
+  const recordName = names[kind] || "record";
+  if (typeof id !== "string" || !id.trim())
+    throw Object.assign(
+      new Error(`Select a ${recordName} before continuing.`),
+      { status: 400 },
+    );
   const r = (
     await client.query(
       "SELECT id,data,created_at FROM records WHERE kind=$1 AND id=$2",
       [kind, id],
     )
   ).rows[0];
-  if (!r) throw Object.assign(new Error("Record not found"), { status: 404 });
+  if (!r)
+    throw Object.assign(
+      new Error(
+        `The selected ${recordName} was not found. Refresh the page and select it again.`,
+      ),
+      { status: 404 },
+    );
   return { id: r.id, ...r.data, createdAt: r.created_at };
 }
 export async function put(kind, data, client = db, id = crypto.randomUUID()) {
